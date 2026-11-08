@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run dbt Prism (Visual Playground)",
+      "type": "extensionHost",
+      "request": "launch",
+      "outFiles": [
+        "${workspaceFolder}/playground/**/*.js"
+      ],
+      "preLaunchTask": "npm: build"
+    }
+  ]
+}

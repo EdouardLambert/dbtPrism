@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build outputs & packaged extension
+dist/
+out/
+*.vsix
+
+# Test & coverage artifacts
+coverage/
+.vitest/
+.vscode-test/
+
+# Logs & OS files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# dbt artifacts (if dbt is run inside playground/)
+**/target/
+**/dbt_packages/
+**/logs/
+
+# VS Code local workspace state (keep launch.json and tasks.json tracked)
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+!.vscode/extensions.json

@@ -1,0 +1,53 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: "Cleaned customer records from raw CRM"
+    columns:
+      - name: customer_id
+        data_type: INTEGER
+        description: "Primary key of the customer"
+        constraints:
+          - type: primary_key
+          - type: not_null
+        data_tests:
+          - unique
+          - not_null
+      - name: email
+        data_type: VARCHAR
+        description: "Verified customer email address"
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique
+
+  - name: stg_orders
+    description: "Cleaned order headers"
+    columns:
+      - name: order_id
+        data_type: INTEGER
+        description: "Primary key of the order"
+        constraints:
+          - type: primary_key
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        data_type: INTEGER
+        description: "Foreign key to stg_customers"
+        constraints:
+          - type: foreign_key
+            to: ref('stg_customers')
+        data_tests:
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+      - name: order_status
+        data_type: VARCHAR
+        description: "Order lifecycle status (placed, shipped, returned)"
+        data_tests:
+          - accepted_values:
+              values: ['placed', 'shipped', 'returned']
+      - name: ordered_at
+        data_type: TIMESTAMP
+        description: "Timestamp when the order was placed"
