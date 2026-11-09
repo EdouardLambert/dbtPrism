@@ -94,4 +94,12 @@ describe('WorkspaceIndexer - Integration with playground/jaffle_prism', () => {
       dataTests: ['unique', 'not_null'],
     });
   });
+
+  it('strips ref() wrapper from foreign_key constraints and relationships data_tests', () => {
+    const stgOrders = indexer.getModel('stg_orders');
+    const fkCol = stgOrders?.columns.get('customer_id');
+
+    expect(fkCol?.constraints).toEqual(['foreign_key -> stg_customers']);
+    expect(fkCol?.dataTests).toEqual(['relationships -> stg_customers.customer_id']);
+  });
 });

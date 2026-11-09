@@ -3,9 +3,8 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { SqlScopeAnalyzer } from '../../../src/core/analyzer/sqlScopeAnalyzer.js';
 import { extractCursor, InMemoryMetadataRegistry } from '../../helpers/cursorTestHarness.js';
-import { table } from 'console';
 
-describe('SqlScopeAnalyzer - Contextual Completion Matrix', () => {
+describe('SqlScopeAnalyzer - Contextual Completion Matrix & Priority', () => {
   let registry: InMemoryMetadataRegistry;
   let analyzer: SqlScopeAnalyzer;
 
@@ -77,17 +76,24 @@ describe('SqlScopeAnalyzer - Contextual Completion Matrix', () => {
     expect(completions[0]?.insertText).toBe('c.email');
   });
 
-  it('proposes both qualified candidates when typing an ambiguous column across joined tables', () => {
+  it('ranks matching table alias FIRST, then its columns, then other joined tables columns (Screen 3 scenario)', () => {
     const query = `
-      select cust|
-      from {{ ref('customers') }} as c
-      join {{ ref('orders') }} as o on c.customer_id = o.customer_id
+      with vip_orders as (
+        select order_id, customer_id from {{ ref('orders') }}
+      )
+      select c|
+      from {{ ref('customers') }} as cus
+      join vip_orders as vip on cus.customer_id = vip.customer_id
     `;
 
     const { sql, cursorOffset } = extractCursor(query);
     const completions = analyzer.computeCompletions(sql, cursorOffset);
 
-    expect(completions.map((c) => c.insertText)).toEqual(['c.customer_id', 'o.customer_id']);
+    expect(completions.map((c) => c.label)).toEqual([
+      'cus',
+      'cus.customer_id',
+      'vip.customer_id',
+    ]);
   });
 
   it('proposes dbt models formatted as ref() snippets when typing in a FROM clause', () => {

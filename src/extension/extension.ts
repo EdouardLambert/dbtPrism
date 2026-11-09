@@ -6,7 +6,11 @@ import * as path from 'node:path';
 import { WorkspaceIndexer } from '../core/indexer/workspaceIndexer.js';
 import { SqlScopeAnalyzer } from '../core/analyzer/sqlScopeAnalyzer.js';
 import { CompletionCandidate } from '../core/types.js';
-import { getDataTypeColor } from '../core/styling/dataTypePalette.js';
+import {
+  renderColumnHeaderMarkdown,
+  renderMaterializationBadgeMarkdown,
+  renderRulePillMarkdown,
+} from '../core/styling/svgBadges.js';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const indexer = new WorkspaceIndexer();
@@ -82,7 +86,7 @@ function toVsCodeCompletionItem(
   const kindMap: Record<CompletionCandidate['kind'], vscode.CompletionItemKind> = {
     column: vscode.CompletionItemKind.Field,
     model: vscode.CompletionItemKind.Module,
-    cte: vscode.CompletionItemKind.Struct,
+    cte: vscode.CompletionItemKind.Interface,
   };
 
   const item = new vscode.CompletionItem(candidate.label, kindMap[candidate.kind]);
@@ -92,13 +96,14 @@ function toVsCodeCompletionItem(
   if (candidate.label.includes('.')) {
     const unweightedCol = candidate.label.split('.')[1] ?? '';
     item.filterText = `${unweightedCol} ${candidate.label}`;
+  } else {
+    item.filterText = candidate.label;
   }
 
-  // Build the rich HTML/Markdown documentation popup for columns
   if (candidate.kind === 'column') {
     item.documentation = buildColumnDocumentationMarkdown(candidate, isLightTheme);
   } else {
-    item.detail = candidate.detail;
+    item.documentation = buildRelationDocumentationMarkdown(candidate, isLightTheme);
   }
 
   return item;
@@ -112,49 +117,65 @@ export function buildColumnDocumentationMarkdown(
   md.supportHtml = true;
   md.isTrusted = true;
 
-  // 1 & 2. First line: Colored Data Type + Source "mytable (table/incremental/view/cte/...)"
-  const sourceLabel = candidate.sourceName
-    ? `${escapeHtml(candidate.sourceName)} (${escapeHtml(candidate.sourceKind ?? 'model')})`
-    : '';
+  // 1. Unified SVG Header: [Icon | TYPE] • source_table [materialization]
+  md.appendMarkdown(
+    renderColumnHeaderMarkdown(
+      candidate.dataType,
+      candidate.sourceName,
+      candidate.sourceKind,
+      isLightTheme
+    )
+  );
 
-  if (candidate.dataType) {
-    const typeColor = getDataTypeColor(candidate.dataType, isLightTheme) ?? '#86c7f9';
-    const coloredType = `<span style="color:${typeColor};"><b>${escapeHtml(candidate.dataType)}</b></span>`;
-    md.appendMarkdown(sourceLabel ? `${coloredType} • ${sourceLabel}` : coloredType);
-  } else if (sourceLabel) {
-    md.appendMarkdown(sourceLabel);
-  }
-
-  // 3. Second line: Column description in italic and #6B7280
+  // 2. Description line in italic and #6B7280
   if (candidate.documentation) {
     md.appendMarkdown(
       `\n\n<span style="color:#6B7280;"><i>${escapeHtml(candidate.documentation)}</i></span>`
     );
   }
 
-  // 4 & 5. Under a horizontal rule: Constraints (#EF4444) and Data Tests (#F97316)
+  // 3. Structured Pill Badges for Constraints (#EF4444) and Data Tests (#F97316)
   const hasConstraints = Boolean(candidate.constraints && candidate.constraints.length > 0);
   const hasDataTests = Boolean(candidate.dataTests && candidate.dataTests.length > 0);
 
   if (hasConstraints || hasDataTests) {
     md.appendMarkdown('\n\n---\n');
-    const footerLines: string[] = [];
+    const ruleRows: string[] = [];
 
     if (hasConstraints && candidate.constraints) {
-      footerLines.push(
-        `<span style="color:#EF4444;">constraints: ${escapeHtml(candidate.constraints.join(', '))}</span>`
-      );
+      const pills = candidate.constraints
+        .map((c) => renderRulePillMarkdown(c, 'constraint'))
+        .join(' ');
+      ruleRows.push(pills);
     }
 
     if (hasDataTests && candidate.dataTests) {
-      footerLines.push(
-        `<span style="color:#F97316;">data_tests: ${escapeHtml(candidate.dataTests.join(', '))}</span>`
-      );
+      const pills = candidate.dataTests
+        .map((t) => renderRulePillMarkdown(t, 'data_test'))
+        .join(' ');
+      ruleRows.push(pills);
     }
 
-    md.appendMarkdown(footerLines.join('<br>\n'));
+    md.appendMarkdown(ruleRows.join('\n\n'));
   }
 
+  return md;
+}
+
+function buildRelationDocumentationMarkdown(
+  candidate: CompletionCandidate,
+  isLightTheme: boolean
+): vscode.MarkdownString {
+  const md = new vscode.MarkdownString();
+  md.supportHtml = true;
+  md.isTrusted = true;
+
+  const matBadge = renderMaterializationBadgeMarkdown(
+    candidate.sourceKind ?? 'model',
+    isLightTheme
+  );
+  const target = candidate.sourceName ?? candidate.label;
+  md.appendMarkdown(`**\`${escapeHtml(target)}\`** &nbsp;${matBadge}`);
   return md;
 }
 

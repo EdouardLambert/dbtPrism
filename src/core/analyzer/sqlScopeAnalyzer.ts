@@ -345,21 +345,49 @@ export class SqlScopeAnalyzer {
     const isMultiTableScope = activeRelations.size > 1;
     const candidates: CompletionCandidate[] = [];
 
-    let priority = 0;
+    let tablePriority = 0;
+    let aliasMatchedColPriority = 100;
+    let otherColPriority = 500;
+
+    // 1. Tier 1 (Highest Priority): Propose matching scoped tables / aliases first (e.g. "cus")
     for (const rel of activeRelations.values()) {
+      const aliasMatches = rel.aliasOrName.toLowerCase().startsWith(lowerPrefix);
+      const targetMatches = rel.targetName.toLowerCase().startsWith(lowerPrefix);
+
+      if (aliasMatches || targetMatches) {
+        candidates.push({
+          label: rel.aliasOrName,
+          insertText: rel.aliasOrName,
+          kind: rel.sourceKind === 'cte' ? 'cte' : 'model',
+          sourceName: rel.targetName,
+          sourceKind: rel.sourceKind,
+          detail: `${rel.targetName} (${rel.sourceKind})`,
+          sortPriority: tablePriority++,
+        });
+      }
+    }
+
+    // 2. Tier 2 & 3: Propose matching columns (prioritizing columns from matching table alias)
+    for (const rel of activeRelations.values()) {
+      const aliasStartsWithPrefix =
+        lowerPrefix.length > 0 && rel.aliasOrName.toLowerCase().startsWith(lowerPrefix);
+
       for (const col of rel.columns) {
         if (!col.name.toLowerCase().startsWith(lowerPrefix)) continue;
 
         const qualifiedText = `${rel.aliasOrName}.${col.name}`;
         const labelAndInsert = isMultiTableScope ? qualifiedText : col.name;
+        const priority = aliasStartsWithPrefix
+          ? aliasMatchedColPriority++
+          : otherColPriority++;
 
         candidates.push(
-          this.createColumnCandidate(col, labelAndInsert, labelAndInsert, rel, priority++)
+          this.createColumnCandidate(col, labelAndInsert, labelAndInsert, rel, priority)
         );
       }
     }
 
-    return candidates;
+    return candidates.sort((a, b) => a.sortPriority - b.sortPriority);
   }
 
   private createColumnCandidate(
