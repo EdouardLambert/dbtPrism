@@ -7,9 +7,16 @@ import {
   DbtRelationToken,
   MetadataRegistryPort,
   RelationMaterialization,
+  SourceLocation,
 } from '../types.js';
 import { sanitizeJinjaSql } from '../parser/jinjaSanitizer.js';
 import { CURSOR_SYNTHETIC_TOKEN, healSqlAtCursor } from '../parser/cursorHealer.js';
+import {
+  CteLocationBlock,
+  extractCursorTokenForDefinition,
+  locateCteDefinitions,
+  locateSelectProjectionColumns,
+} from '../parser/sqlLocationFinder.js';
 
 const { Parser } = NodeSqlParser;
 
@@ -26,12 +33,14 @@ export class SqlScopeAnalyzer {
   constructor(private readonly registry: MetadataRegistryPort) {}
 
   /**
-   * Statically infers the output columns, materialization, and upstream dbt refs of a model SQL file.
+   * Statically infers the output columns, definition locations, materialization,
+   * and upstream dbt refs of a model SQL file.
    */
   public inferModelColumns(
     rawSql: string,
     modelName: string,
-    defaultMaterialized: RelationMaterialization = 'view'
+    defaultMaterialized: RelationMaterialization = 'view',
+    filePath = ''
   ): {
     columns: ColumnMetadata[];
     refs: string[];
@@ -49,17 +58,132 @@ export class SqlScopeAnalyzer {
       return { columns: [], refs, materialized: effectiveMaterialized };
     }
 
-    const cteMap = this.extractLocalCtes(ast, relations);
+    const cteLocations = locateCteDefinitions(sanitizedSql, filePath);
+    const cteMap = this.extractLocalCtes(ast, relations, sanitizedSql, filePath, cteLocations);
+
+    const mainQueryStartOffset = this.getMainQueryStartOffset(cteLocations);
+    const mainProjectedLocations = filePath
+      ? locateSelectProjectionColumns(
+          sanitizedSql,
+          filePath,
+          mainQueryStartOffset,
+          sanitizedSql.length
+        )
+      : new Map<string, SourceLocation>();
+
     const scopedRelations = this.resolveScopedRelations(ast, cteMap, relations);
     const columns = this.extractProjectedColumns(
       ast,
       scopedRelations,
       modelName,
       effectiveMaterialized,
-      'sql_inferred'
+      'sql_inferred',
+      mainProjectedLocations
     );
 
     return { columns, refs, materialized: effectiveMaterialized };
+  }
+
+  /**
+   * Resolves the target SourceLocation for Go-to-Definition (Ctrl+Click / F12)
+   * on a table, model ref(), CTE alias, or column.
+   */
+  public computeDefinition(
+    rawSql: string,
+    cursorOffset: number,
+    currentFilePath = ''
+  ): SourceLocation | null {
+    const { sanitizedSql, relations } = sanitizeJinjaSql(rawSql);
+
+    // 1. Direct click inside {{ ref('model') }} or {{ source('src', 'table') }}
+    for (const rel of relations.values()) {
+      if (cursorOffset >= rel.startOffset && cursorOffset <= rel.endOffset) {
+        return this.getModelFileStartLocation(rel.modelOrTableName);
+      }
+    }
+
+    const token = extractCursorTokenForDefinition(sanitizedSql, cursorOffset);
+    if (!token) return null;
+
+    const ast =
+      this.tryParseAst(sanitizedSql) ??
+      this.tryParseAst(healSqlAtCursor(rawSql, sanitizedSql, cursorOffset).healedSql);
+    if (!ast) return null;
+
+    const cteLocations = locateCteDefinitions(sanitizedSql, currentFilePath);
+    const cteMap = this.extractLocalCtes(
+      ast,
+      relations,
+      sanitizedSql,
+      currentFilePath,
+      cteLocations
+    );
+
+    // 2. Check if clicking directly on a CTE name in `WITH cte_name AS (`
+    const lowerWord = token.word.toLowerCase();
+    const clickedCteBlock = cteLocations.get(lowerWord);
+    if (
+      clickedCteBlock &&
+      cursorOffset >= token.startOffset &&
+      token.startOffset < clickedCteBlock.bodyStartOffset
+    ) {
+      return clickedCteBlock.nameLocation;
+    }
+
+    // 3. Determine the active SELECT AST block at the cursor offset
+    const activeSelectAst = this.findSelectAstAtOffset(ast, cteLocations, cursorOffset);
+    const activeRelations = this.resolveScopedRelations(activeSelectAst, cteMap, relations);
+
+    // 4. Case A: Clicking on table/CTE qualifier before a dot (`cus.customer_id` -> `cus`)
+    //    or clicking on a table/CTE/alias in a FROM / JOIN clause
+    if (token.isQualifierBeforeDot || token.isAfterFromOrJoin) {
+      return this.resolveRelationDefinition(lowerWord, activeRelations, cteLocations);
+    }
+
+    // 5. Case B: Clicking on a qualified column (`cus.customer_id` -> `customer_id`)
+    if (token.qualifier) {
+      const targetRel = activeRelations.get(token.qualifier.toLowerCase());
+      const col = targetRel?.columns.find((c) => c.name.toLowerCase() === lowerWord);
+      if (col?.definitionLocation) {
+        return col.definitionLocation;
+      }
+      return null;
+    }
+
+    // 6. Case C: Clicking on an unqualified column or column alias inside SELECT / WHERE / ON / GROUP BY
+    // 6a. Direct match against columns in activeRelations (e.g. `order_id` or `amount_usd` in `vip_orders`)
+    for (const rel of activeRelations.values()) {
+      const foundCol = rel.columns.find((c) => c.name.toLowerCase() === lowerWord);
+      if (foundCol?.definitionLocation) {
+        return foundCol.definitionLocation;
+      }
+    }
+
+    // 6b. If clicking on a column alias on its own definition line (e.g. `amount_usd as net_revenue_usd`),
+    //     resolve the underlying source column from `activeRelations` so the user can chain Ctrl+Click!
+    const aliasedSourceRef = this.findUnderlyingColumnForSelectAlias(
+      activeSelectAst,
+      lowerWord
+    );
+    if (aliasedSourceRef) {
+      if (aliasedSourceRef.table) {
+        const rel = activeRelations.get(aliasedSourceRef.table.toLowerCase());
+        const col = rel?.columns.find(
+          (c) => c.name.toLowerCase() === aliasedSourceRef.column.toLowerCase()
+        );
+        if (col?.definitionLocation) return col.definitionLocation;
+      } else {
+        for (const rel of activeRelations.values()) {
+          const col = rel.columns.find(
+            (c) => c.name.toLowerCase() === aliasedSourceRef.column.toLowerCase()
+          );
+          if (col?.definitionLocation) return col.definitionLocation;
+        }
+      }
+    }
+
+    // 7. Fallback: check if the identifier is a relation alias or CTE name
+    return this.resolveRelationDefinition(lowerWord, activeRelations, cteLocations);
   }
 
   public computeCompletions(rawSql: string, cursorOffset: number): CompletionCandidate[] {
@@ -75,7 +199,7 @@ export class SqlScopeAnalyzer {
       return [];
     }
 
-    const cteMap = this.extractLocalCtes(ast, relations);
+    const cteMap = this.extractLocalCtes(ast, relations, healed.healedSql);
 
     if (healed.intent === 'TABLE_OR_MODEL') {
       return this.buildTableOrModelCompletions(healed.prefix, cteMap);
@@ -93,6 +217,120 @@ export class SqlScopeAnalyzer {
     }
 
     return [];
+  }
+
+  private resolveRelationDefinition(
+    lowerIdentifier: string,
+    activeRelations: Map<string, ScopedRelation>,
+    cteLocations: Map<string, CteLocationBlock>
+  ): SourceLocation | null {
+    const scopedRel = activeRelations.get(lowerIdentifier);
+    if (scopedRel) {
+      if (scopedRel.sourceKind === 'cte') {
+        return cteLocations.get(scopedRel.targetName.toLowerCase())?.nameLocation ?? null;
+      }
+      return this.getModelFileStartLocation(scopedRel.targetName);
+    }
+
+    // Also check if the user clicked on the targetName directly when an alias is present
+    for (const rel of activeRelations.values()) {
+      if (rel.targetName.toLowerCase() === lowerIdentifier) {
+        if (rel.sourceKind === 'cte') {
+          return cteLocations.get(lowerIdentifier)?.nameLocation ?? null;
+        }
+        return this.getModelFileStartLocation(rel.targetName);
+      }
+    }
+
+    const cteLoc = cteLocations.get(lowerIdentifier);
+    if (cteLoc) {
+      return cteLoc.nameLocation;
+    }
+
+    return this.getModelFileStartLocation(lowerIdentifier);
+  }
+
+  private getModelFileStartLocation(modelName: string): SourceLocation | null {
+    const model = this.registry.getModel(modelName);
+    if (!model || !model.filePath) return null;
+    return {
+      filePath: model.filePath,
+      line: 0,
+      startColumn: 0,
+      endColumn: 0,
+    };
+  }
+
+  private getMainQueryStartOffset(cteLocations: Map<string, CteLocationBlock>): number {
+    let maxEnd = 0;
+    for (const block of cteLocations.values()) {
+      if (block.bodyEndOffset > maxEnd) {
+        maxEnd = block.bodyEndOffset;
+      }
+    }
+    return maxEnd;
+  }
+
+  private findSelectAstAtOffset(
+    rootAst: any,
+    cteLocations: Map<string, CteLocationBlock>,
+    cursorOffset: number
+  ): any {
+    if (Array.isArray(rootAst?.with)) {
+      for (const cteDef of rootAst.with) {
+        const cteName = this.unwrapIdentifier(cteDef?.name)?.toLowerCase();
+        if (!cteName) continue;
+        const loc = cteLocations.get(cteName);
+        if (loc && cursorOffset >= loc.bodyStartOffset && cursorOffset <= loc.bodyEndOffset) {
+          return cteDef?.stmt?.ast ?? cteDef?.stmt ?? rootAst;
+        }
+      }
+    }
+    return rootAst;
+  }
+
+  private findUnderlyingColumnForSelectAlias(
+    selectAst: any,
+    lowerAliasName: string
+  ): { table?: string; column: string } | undefined {
+    const columns = selectAst?.columns;
+    if (!Array.isArray(columns)) return undefined;
+
+    for (const colItem of columns) {
+      const explicitAlias = this.unwrapIdentifier(colItem?.as)?.toLowerCase();
+      if (explicitAlias === lowerAliasName) {
+        return this.extractFirstColumnRefFromExpr(colItem?.expr);
+      }
+    }
+    return undefined;
+  }
+
+  private extractFirstColumnRefFromExpr(
+    expr: any
+  ): { table?: string; column: string } | undefined {
+    if (!expr || typeof expr !== 'object') return undefined;
+
+    const directCol = this.unwrapIdentifier(expr.column);
+    if (directCol && directCol !== '*' && directCol !== CURSOR_SYNTHETIC_TOKEN) {
+      return {
+        table: this.unwrapIdentifier(expr.table),
+        column: directCol,
+      };
+    }
+
+    for (const value of Object.values(expr)) {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = this.extractFirstColumnRefFromExpr(item);
+          if (found) return found;
+        }
+      } else if (value && typeof value === 'object') {
+        const found = this.extractFirstColumnRefFromExpr(value);
+        if (found) return found;
+      }
+    }
+
+    return undefined;
   }
 
   private tryParseAst(sql: string): any | null {
@@ -117,7 +355,6 @@ export class SqlScopeAnalyzer {
   private inferExpressionDataType(expr: any): string | undefined {
     if (!expr) return undefined;
 
-    // 1. Explicit CAST(x AS TYPE) or x::TYPE
     if (expr.type === 'cast') {
       const target = Array.isArray(expr.target) ? expr.target[0] : expr.target;
       if (typeof target?.dataType === 'string') {
@@ -125,14 +362,12 @@ export class SqlScopeAnalyzer {
       }
     }
 
-    // 2. Aggregate functions (COUNT -> BIGINT, SUM/AVG -> NUMERIC)
     if (expr.type === 'aggr_func' && typeof expr.name === 'string') {
       const funcName = expr.name.toUpperCase();
       if (funcName === 'COUNT') return 'BIGINT';
       if (funcName === 'SUM' || funcName === 'AVG') return 'NUMERIC';
     }
 
-    // 3. Binary arithmetic expressions (e.g. amount_cents / 100.0)
     if (expr.type === 'binary_expr' && ['/', '*', '+', '-'].includes(expr.operator)) {
       return 'NUMERIC';
     }
@@ -142,7 +377,10 @@ export class SqlScopeAnalyzer {
 
   private extractLocalCtes(
     rootAst: any,
-    relations: Map<string, DbtRelationToken>
+    relations: Map<string, DbtRelationToken>,
+    sanitizedSql = '',
+    filePath = '',
+    precomputedCteLocations?: Map<string, CteLocationBlock>
   ): Map<string, ColumnMetadata[]> {
     const cteColumns = new Map<string, ColumnMetadata[]>();
     const withClause: any[] | undefined = rootAst?.with;
@@ -151,10 +389,25 @@ export class SqlScopeAnalyzer {
       return cteColumns;
     }
 
+    const cteLocations =
+      precomputedCteLocations ??
+      (sanitizedSql ? locateCteDefinitions(sanitizedSql, filePath) : new Map());
+
     for (const cteDef of withClause) {
       const cteName = this.unwrapIdentifier(cteDef?.name);
       const cteStmt = cteDef?.stmt?.ast ?? cteDef?.stmt;
       if (!cteName || !cteStmt) continue;
+
+      const cteBlock = cteLocations.get(cteName.toLowerCase());
+      const projectedLocations =
+        cteBlock && sanitizedSql
+          ? locateSelectProjectionColumns(
+              sanitizedSql,
+              filePath,
+              cteBlock.bodyStartOffset,
+              cteBlock.bodyEndOffset
+            )
+          : undefined;
 
       const scopedParents = this.resolveScopedRelations(cteStmt, cteColumns, relations);
       const projected = this.extractProjectedColumns(
@@ -162,7 +415,8 @@ export class SqlScopeAnalyzer {
         scopedParents,
         cteName,
         'cte',
-        'cte_local'
+        'cte_local',
+        projectedLocations
       );
       cteColumns.set(cteName.toLowerCase(), projected);
     }
@@ -175,7 +429,8 @@ export class SqlScopeAnalyzer {
     scopedRelations: Map<string, ScopedRelation>,
     currentScopeName: string,
     currentScopeKind: RelationMaterialization = 'cte',
-    defaultOrigin: 'cte_local' | 'sql_inferred' = 'cte_local'
+    defaultOrigin: 'cte_local' | 'sql_inferred' = 'cte_local',
+    explicitLocations?: Map<string, SourceLocation>
   ): ColumnMetadata[] {
     const result: ColumnMetadata[] = [];
     const columns = selectAst?.columns;
@@ -194,6 +449,7 @@ export class SqlScopeAnalyzer {
       const tableQual = this.unwrapIdentifier(expr.table)?.toLowerCase();
 
       // Handle SELECT * or SELECT alias.*
+      // Preserve upstream `definitionLocation` so Ctrl+Click jumps to where the column was explicitly defined!
       if (rawColumnName === '*') {
         const starSourceCols: ColumnMetadata[] = [];
         if (tableQual) {
@@ -205,7 +461,6 @@ export class SqlScopeAnalyzer {
           }
         }
 
-        // Preserve rich metadata (type, doc, constraints, tests) but bind source to current scope
         for (const upstreamCol of starSourceCols) {
           result.push({
             ...upstreamCol,
@@ -240,6 +495,7 @@ export class SqlScopeAnalyzer {
       }
 
       const inferredExprType = this.inferExpressionDataType(expr);
+      const explicitLoc = explicitLocations?.get(effectiveName.toLowerCase());
 
       result.push({
         name: effectiveName,
@@ -250,6 +506,7 @@ export class SqlScopeAnalyzer {
         sourceKind: currentScopeKind,
         constraints: upstreamMeta?.constraints,
         dataTests: upstreamMeta?.dataTests,
+        definitionLocation: explicitLoc ?? upstreamMeta?.definitionLocation,
       });
     }
 
@@ -348,7 +605,6 @@ export class SqlScopeAnalyzer {
     let aliasMatchedColPriority = 100;
     let otherColPriority = 500;
 
-    // 1. Tier 1 (Highest Priority): Propose matching scoped tables / aliases first (e.g. "cus")
     for (const rel of activeRelations.values()) {
       const aliasMatches = rel.aliasOrName.toLowerCase().startsWith(lowerPrefix);
       const targetMatches = rel.targetName.toLowerCase().startsWith(lowerPrefix);
@@ -366,7 +622,6 @@ export class SqlScopeAnalyzer {
       }
     }
 
-    // 2. Tier 2 & 3: Propose matching columns (prioritizing columns from matching table alias)
     for (const rel of activeRelations.values()) {
       const aliasStartsWithPrefix =
         lowerPrefix.length > 0 && rel.aliasOrName.toLowerCase().startsWith(lowerPrefix);
@@ -396,7 +651,6 @@ export class SqlScopeAnalyzer {
     relation: ScopedRelation,
     sortPriority: number
   ): CompletionCandidate {
-    // Always use the direct relation being queried as the displayed source
     const sourceName = relation.targetName;
     const sourceKind = relation.sourceKind;
 

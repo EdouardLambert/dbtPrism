@@ -12,6 +12,13 @@ export type RelationMaterialization =
   | 'source'
   | 'model';
 
+export interface SourceLocation {
+  filePath: string;
+  line: number;
+  startColumn: number;
+  endColumn: number;
+}
+
 export interface ColumnMetadata {
   name: string;
   dataType?: string;
@@ -21,6 +28,7 @@ export interface ColumnMetadata {
   sourceKind?: RelationMaterialization;
   constraints?: string[];
   dataTests?: string[];
+  definitionLocation?: SourceLocation;
 }
 
 export interface ModelDescriptor {

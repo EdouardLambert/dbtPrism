@@ -59,14 +59,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   };
 
+  const definitionProvider: vscode.DefinitionProvider = {
+    provideDefinition(
+      document: vscode.TextDocument,
+      position: vscode.Position
+    ): vscode.Definition | null {
+      const rawSql = document.getText();
+      const cursorOffset = document.offsetAt(position);
+      const target = analyzer.computeDefinition(rawSql, cursorOffset, document.uri.fsPath);
+
+      if (!target || !target.filePath) {
+        return null;
+      }
+
+      const targetUri = vscode.Uri.file(target.filePath);
+      const targetRange = new vscode.Range(
+        new vscode.Position(target.line, target.startColumn),
+        new vscode.Position(target.line, target.endColumn)
+      );
+
+      return new vscode.Location(targetUri, targetRange);
+    },
+  };
+
+  const selector: vscode.DocumentSelector = [
+    { language: 'sql' },
+    { language: 'jinja-sql' },
+    { pattern: '**/*.sql' },
+  ];
+
   context.subscriptions.push(
-    vscode.languages.registerCompletionItemProvider(
-      [{ language: 'sql' }, { language: 'jinja-sql' }, { pattern: '**/*.sql' }],
-      provider,
-      '.',
-      "'",
-      '"'
-    )
+    vscode.languages.registerCompletionItemProvider(selector, provider, '.', "'", '"'),
+    vscode.languages.registerDefinitionProvider(selector, definitionProvider)
   );
 }
 

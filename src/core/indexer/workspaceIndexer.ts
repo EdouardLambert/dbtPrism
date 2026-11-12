@@ -130,7 +130,12 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
         columns: inferredCols,
         refs,
         materialized,
-      } = this.analyzer.inferModelColumns(sqlModel.rawSql, sqlModel.modelName, defaultMat);
+      } = this.analyzer.inferModelColumns(
+        sqlModel.rawSql,
+        sqlModel.modelName,
+        defaultMat,
+        sqlModel.filePath
+      );
 
       const yamlCols = this.yamlSchemas.get(key);
       const mergedColumns = this.mergeColumns(
@@ -190,6 +195,7 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
           sourceKind: modelMaterialized,
           constraints: ymlCol.constraints ?? sqlCol.constraints,
           dataTests: ymlCol.dataTests ?? sqlCol.dataTests,
+          definitionLocation: sqlCol.definitionLocation ?? ymlCol.definitionLocation,
         });
       } else {
         merged.set(colKey, {
