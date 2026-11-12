@@ -16,11 +16,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const indexer = new WorkspaceIndexer();
   const analyzer = new SqlScopeAnalyzer(indexer);
 
-  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  statusBar.text = '$(sync~spin) dbt Prism: Indexing...';
-  statusBar.show();
-  context.subscriptions.push(statusBar);
-
   const indexAllWorkspaces = async () => {
     const folders = vscode.workspace.workspaceFolders ?? [];
     for (const folder of folders) {
@@ -32,9 +27,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await indexer.indexWorkspaceFolder(playgroundPath);
       }
     }
-    const count = indexer.getAllModels().length;
-    statusBar.text = `$(database) dbt Prism: ${count} models`;
-    statusBar.tooltip = 'dbt Prism semantic SQL & schema.yml index is active';
   };
 
   await indexAllWorkspaces();
@@ -47,7 +39,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         doc.fileName.endsWith('.yaml')
       ) {
         await indexer.updateFile(doc.fileName);
-        statusBar.text = `$(database) dbt Prism: ${indexer.getAllModels().length} models`;
       }
     })
   );
