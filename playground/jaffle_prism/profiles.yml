@@ -1,0 +1,5 @@
+jaffle_prism:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb

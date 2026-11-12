@@ -195,13 +195,23 @@ export class SqlScopeAnalyzer {
 
       // Handle SELECT * or SELECT alias.*
       if (rawColumnName === '*') {
+        const starSourceCols: ColumnMetadata[] = [];
         if (tableQual) {
           const targetRel = scopedRelations.get(tableQual);
-          if (targetRel) result.push(...targetRel.columns);
+          if (targetRel) starSourceCols.push(...targetRel.columns);
         } else {
           for (const rel of scopedRelations.values()) {
-            result.push(...rel.columns);
+            starSourceCols.push(...rel.columns);
           }
+        }
+
+        // Preserve rich metadata (type, doc, constraints, tests) but bind source to current scope
+        for (const upstreamCol of starSourceCols) {
+          result.push({
+            ...upstreamCol,
+            sourceModelName: currentScopeName,
+            sourceKind: currentScopeKind,
+          });
         }
         continue;
       }
@@ -236,8 +246,8 @@ export class SqlScopeAnalyzer {
         dataType: inferredExprType ?? upstreamMeta?.dataType,
         description: upstreamMeta?.description,
         origin: upstreamMeta?.origin ?? defaultOrigin,
-        sourceModelName: upstreamMeta?.sourceModelName ?? currentScopeName,
-        sourceKind: upstreamMeta?.sourceKind ?? currentScopeKind,
+        sourceModelName: currentScopeName,
+        sourceKind: currentScopeKind,
         constraints: upstreamMeta?.constraints,
         dataTests: upstreamMeta?.dataTests,
       });
@@ -269,14 +279,7 @@ export class SqlScopeAnalyzer {
         const relKind: RelationMaterialization =
           modelDesc?.materialized ?? (dbtRel.type === 'source' ? 'source' : 'model');
 
-        const cols = modelDesc
-          ? Array.from(modelDesc.columns.values()).map((c) => ({
-              ...c,
-              sourceModelName: c.sourceModelName ?? modelDesc.name,
-              sourceKind: c.sourceKind ?? relKind,
-            }))
-          : [];
-
+        const cols = modelDesc ? Array.from(modelDesc.columns.values()) : [];
         const effectiveAlias = (explicitAlias ?? dbtRel.modelOrTableName).toLowerCase();
 
         scoped.set(effectiveAlias, {
@@ -311,11 +314,7 @@ export class SqlScopeAnalyzer {
           aliasOrName: explicitAlias ?? rawTableName,
           targetName: directModel.name,
           sourceKind: relKind,
-          columns: Array.from(directModel.columns.values()).map((c) => ({
-            ...c,
-            sourceModelName: c.sourceModelName ?? directModel.name,
-            sourceKind: c.sourceKind ?? relKind,
-          })),
+          columns: Array.from(directModel.columns.values()),
         });
       }
     }
@@ -397,8 +396,9 @@ export class SqlScopeAnalyzer {
     relation: ScopedRelation,
     sortPriority: number
   ): CompletionCandidate {
-    const sourceName = col.sourceModelName ?? relation.targetName;
-    const sourceKind = col.sourceKind ?? relation.sourceKind;
+    // Always use the direct relation being queried as the displayed source
+    const sourceName = relation.targetName;
+    const sourceKind = relation.sourceKind;
 
     return {
       label,

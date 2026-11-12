@@ -80,7 +80,7 @@ describe('SqlScopeAnalyzer - Local CTE Resolution & Lineage', () => {
     expect(completions).toHaveLength(2);
     expect(completions[0]).toMatchObject({
       label: 'user_id',
-      detail: 'INTEGER • stg_users (view)',
+      detail: 'INTEGER • active_users (cte)',
       documentation: 'Unique user identifier',
     });
   });

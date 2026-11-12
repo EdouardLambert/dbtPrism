@@ -133,7 +133,12 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
       } = this.analyzer.inferModelColumns(sqlModel.rawSql, sqlModel.modelName, defaultMat);
 
       const yamlCols = this.yamlSchemas.get(key);
-      const mergedColumns = this.mergeColumns(inferredCols, yamlCols, materialized);
+      const mergedColumns = this.mergeColumns(
+        sqlModel.modelName,
+        inferredCols,
+        yamlCols,
+        materialized
+      );
 
       this.models.set(key, {
         name: sqlModel.modelName,
@@ -164,6 +169,7 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
   }
 
   private mergeColumns(
+    modelName: string,
     inferredCols: ColumnMetadata[],
     yamlCols: Map<string, ColumnMetadata> | undefined,
     modelMaterialized: RelationMaterialization
@@ -180,15 +186,16 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
           dataType: ymlCol.dataType ?? sqlCol.dataType,
           description: ymlCol.description ?? sqlCol.description,
           origin: 'schema_yml',
-          sourceModelName: ymlCol.sourceModelName ?? sqlCol.sourceModelName,
-          sourceKind: ymlCol.sourceKind ?? sqlCol.sourceKind ?? modelMaterialized,
+          sourceModelName: modelName,
+          sourceKind: modelMaterialized,
           constraints: ymlCol.constraints ?? sqlCol.constraints,
           dataTests: ymlCol.dataTests ?? sqlCol.dataTests,
         });
       } else {
         merged.set(colKey, {
           ...sqlCol,
-          sourceKind: sqlCol.sourceKind ?? modelMaterialized,
+          sourceModelName: modelName,
+          sourceKind: modelMaterialized,
         });
       }
     }
@@ -198,7 +205,8 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
         if (!merged.has(colKey)) {
           merged.set(colKey, {
             ...ymlCol,
-            sourceKind: ymlCol.sourceKind ?? modelMaterialized,
+            sourceModelName: modelName,
+            sourceKind: modelMaterialized,
           });
         }
       }

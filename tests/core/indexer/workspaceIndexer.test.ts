@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { describe, expect, it, beforeAll } from 'vitest';
 import { WorkspaceIndexer } from '../../../src/core/indexer/workspaceIndexer.js';
 import { SqlScopeAnalyzer } from '../../../src/core/analyzer/sqlScopeAnalyzer.js';
+import { parseDbtSchemaYaml } from '../../../src/core/indexer/schemaYamlParser.js';
 import { extractCursor } from '../../helpers/cursorTestHarness.js';
 
 describe('WorkspaceIndexer - Integration with playground/jaffle_prism', () => {
@@ -63,14 +64,15 @@ describe('WorkspaceIndexer - Integration with playground/jaffle_prism', () => {
       'first_name',
       'last_name',
       'signup_date',
+      'is_admin',
       'lifetime_orders_count',
       'lifetime_spend_usd',
     ]);
 
     expect(cols.get('lifetime_orders_count')).toMatchObject({
       dataType: 'BIGINT',
-      sourceModelName: 'order_metrics',
-      sourceKind: 'cte',
+      sourceModelName: 'customers',
+      sourceKind: 'table',
     });
   });
 
@@ -87,17 +89,31 @@ describe('WorkspaceIndexer - Integration with playground/jaffle_prism', () => {
     expect(customerIdCandidate).toMatchObject({
       label: 'customer_id',
       dataType: 'INTEGER',
-      sourceName: 'stg_customers',
-      sourceKind: 'view',
+      sourceName: 'customers',
+      sourceKind: 'table',
       documentation: 'Primary key of the customer',
       constraints: ['primary_key', 'not_null'],
       dataTests: ['unique', 'not_null'],
     });
   });
 
-  it('strips ref() wrapper from foreign_key constraints and relationships data_tests', () => {
-    const stgOrders = indexer.getModel('stg_orders');
-    const fkCol = stgOrders?.columns.get('customer_id');
+  it('strips ref() and source() wrappers from foreign_key constraints and relationships data_tests', () => {
+    const inlineYaml = `
+version: 2
+models:
+  - name: stg_orders
+    columns:
+      - name: customer_id
+        constraints:
+          - type: foreign_key
+            to: ref('stg_customers')
+        data_tests:
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+`;
+    const parsed = parseDbtSchemaYaml(inlineYaml);
+    const fkCol = parsed[0]?.columns.get('customer_id');
 
     expect(fkCol?.constraints).toEqual(['foreign_key -> stg_customers']);
     expect(fkCol?.dataTests).toEqual(['relationships -> stg_customers.customer_id']);

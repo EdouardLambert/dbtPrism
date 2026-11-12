@@ -133,7 +133,9 @@ function extractDataTests(rawTests: unknown): string[] {
     } else if (item && typeof item === 'object') {
       const keys = Object.keys(item);
       for (const testName of keys) {
-        const config = (item as Record<string, any>)[testName];
+        const rawConfig = (item as Record<string, any>)[testName];
+        const config = rawConfig?.arguments ?? rawConfig;
+
         if (testName === 'relationships' && config?.to) {
           const cleanTarget = cleanDbtRelationTarget(String(config.to));
           const field = config.field ? `.${String(config.field).trim()}` : '';

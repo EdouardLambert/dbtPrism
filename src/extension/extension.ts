@@ -117,24 +117,32 @@ export function buildColumnDocumentationMarkdown(
   md.supportHtml = true;
   md.isTrusted = true;
 
-  // 1. Unified SVG Header: [Icon | TYPE] • source_table [materialization]
+  const rawColumnName = candidate.label.includes('.')
+    ? (candidate.label.split('.').pop() ?? candidate.label)
+    : candidate.label;
+
+  // 1. Unified SVG Header: [Icon | TYPE] • column_name
   md.appendMarkdown(
-    renderColumnHeaderMarkdown(
-      candidate.dataType,
-      candidate.sourceName,
-      candidate.sourceKind,
-      isLightTheme
-    )
+    renderColumnHeaderMarkdown(candidate.dataType, rawColumnName, isLightTheme)
   );
 
-  // 2. Description line in italic and #6B7280
+  // 2. Second line: "source: masource (view)"
+  if (candidate.sourceName) {
+    const sourceKind = candidate.sourceKind ?? 'model';
+    const sourceColor = isLightTheme ? '#4B5563' : '#9CA3AF';
+    md.appendMarkdown(
+      `\n\n<span style="color:${sourceColor};">source: <b>${escapeHtml(candidate.sourceName)}</b> (${escapeHtml(sourceKind)})</span>`
+    );
+  }
+
+  // 3. Third line: Column description in italic and #6B7280
   if (candidate.documentation) {
     md.appendMarkdown(
       `\n\n<span style="color:#6B7280;"><i>${escapeHtml(candidate.documentation)}</i></span>`
     );
   }
 
-  // 3. Structured Pill Badges for Constraints (#EF4444) and Data Tests (#F97316)
+  // 4. Structured Pill Badges for Constraints (#EF4444) and Data Tests (#F97316)
   const hasConstraints = Boolean(candidate.constraints && candidate.constraints.length > 0);
   const hasDataTests = Boolean(candidate.dataTests && candidate.dataTests.length > 0);
 

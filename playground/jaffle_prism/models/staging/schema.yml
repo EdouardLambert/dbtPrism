@@ -40,14 +40,16 @@ models:
             to: ref('stg_customers')
         data_tests:
           - relationships:
-              to: ref('stg_customers')
-              field: customer_id
+              arguments:
+                to: ref('stg_customers')
+                field: customer_id
       - name: order_status
         data_type: VARCHAR
         description: "Order lifecycle status (placed, shipped, returned)"
         data_tests:
           - accepted_values:
-              values: ['placed', 'shipped', 'returned']
+              arguments:
+                values: ['placed', 'shipped', 'returned']
       - name: ordered_at
         data_type: TIMESTAMP
         description: "Timestamp when the order was placed"
