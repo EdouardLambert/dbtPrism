@@ -24,9 +24,15 @@
     "type": "git",
     "url": "https://github.com/edouard-lambert/dbt-prism.git"
   },
+  "extensionKind": [
+    "workspace"
+  ],
   "activationEvents": [
     "onLanguage:sql",
-    "onLanguage:jinja-sql"
+    "onLanguage:jinja-sql",
+    "onLanguage:postgres",
+    "workspaceContains:**/dbt_project.yml",
+    "onStartupFinished"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -50,7 +56,7 @@
     }
   },
   "scripts": {
-    "build": "esbuild ./src/extension/extension.ts --bundle --minify --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "build": "esbuild ./src/extension/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
     "vscode:prepublish": "npm run typecheck && npm test && npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

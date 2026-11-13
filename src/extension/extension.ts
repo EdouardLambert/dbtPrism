@@ -19,13 +19,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const indexAllWorkspaces = async () => {
     const folders = vscode.workspace.workspaceFolders ?? [];
     for (const folder of folders) {
-      const rootPath = folder.uri.fsPath;
-      await indexer.indexWorkspaceFolder(rootPath);
-
-      const playgroundPath = path.join(rootPath, 'playground', 'jaffle_prism');
-      if (fs.existsSync(playgroundPath)) {
-        await indexer.indexWorkspaceFolder(playgroundPath);
-      }
+      await indexer.indexWorkspaceFolder(folder.uri.fsPath);
     }
   };
 
@@ -93,7 +87,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const selector: vscode.DocumentSelector = [
     { language: 'sql' },
     { language: 'jinja-sql' },
-    { pattern: '**/*.sql' },
+    { language: 'postgres' },
+    { scheme: 'file', pattern: '**/*.sql' },
   ];
 
   context.subscriptions.push(

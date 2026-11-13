@@ -44,15 +44,15 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
     const normalizedRoot = rootDir.replace(/\\/g, '/');
 
     const [yamlFiles, sqlFiles] = await Promise.all([
-      fg(['models/**/*.{yml,yaml}', 'snapshots/**/*.{yml,yaml}'], {
+      fg(['**/models/**/*.{yml,yaml}', '**/snapshots/**/*.{yml,yaml}'], {
         cwd: normalizedRoot,
         absolute: true,
-        ignore: ['**/target/**', '**/dbt_packages/**', '**/node_modules/**'],
+        ignore: ['**/target/**', '**/dbt_packages/**', '**/node_modules/**', '**/.git/**'],
       }),
-      fg(['models/**/*.sql', 'snapshots/**/*.sql'], {
+      fg(['**/models/**/*.sql', '**/snapshots/**/*.sql'], {
         cwd: normalizedRoot,
         absolute: true,
-        ignore: ['**/target/**', '**/dbt_packages/**', '**/node_modules/**'],
+        ignore: ['**/target/**', '**/dbt_packages/**', '**/node_modules/**', '**/.git/**'],
       }),
     ]);
 
