@@ -10,6 +10,26 @@
     "onLanguage:sql",
     "onLanguage:jinja-sql"
   ],
+  "contributes": {
+    "configuration": {
+      "title": "dbt Prism",
+      "properties": {
+        "dbtPrism.goToDefinition.tableTarget": {
+          "type": "string",
+          "enum": [
+            "from_alias",
+            "source_model"
+          ],
+          "enumDescriptions": [
+            "Jump first to the table/alias declaration in the local FROM or JOIN clause, then Ctrl+Click the ref() or CTE name to open the source.",
+            "Jump directly to the source dbt model file (.sql) or CTE declaration."
+          ],
+          "default": "from_alias",
+          "description": "Controls where Ctrl+Click (Go to Definition) navigates when clicking a table qualifier in a query (e.g. 'cus' in 'SELECT cus.id')."
+        }
+      }
+    }
+  },
   "main": "./dist/extension.js",
   "scripts": {
     "build": "esbuild ./src/extension/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",

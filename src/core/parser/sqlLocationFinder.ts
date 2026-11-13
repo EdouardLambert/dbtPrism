@@ -1,6 +1,6 @@
 // src/core/parser/sqlLocationFinder.ts
 
-import { SourceLocation } from '../types.js';
+import { DbtRelationToken, SourceLocation } from '../types.js';
 
 export interface CteLocationBlock {
   cteName: string;
@@ -309,4 +309,124 @@ export function extractCursorTokenForDefinition(
     startOffset: start,
     endOffset: end,
   };
+}
+
+// À ajouter à la fin de src/core/parser/sqlLocationFinder.ts :
+
+const SQL_CLAUSE_RESERVED_WORDS = new Set([
+  'on',
+  'using',
+  'where',
+  'group',
+  'order',
+  'having',
+  'limit',
+  'offset',
+  'qualify',
+  'window',
+  'union',
+  'except',
+  'intersect',
+  'join',
+  'inner',
+  'left',
+  'right',
+  'full',
+  'cross',
+  'natural',
+  'outer',
+  'lateral',
+  'as',
+]);
+
+/**
+ * Locates the exact SourceLocation of table aliases (or unaliased table names)
+ * declared in the FROM and JOIN clauses of the active query block [blockStartOffset, blockEndOffset].
+ */
+export function locateFromJoinAliases(
+  sanitizedSql: string,
+  filePath: string,
+  blockStartOffset: number,
+  blockEndOffset: number,
+  relations: Map<string, DbtRelationToken>
+): Map<string, SourceLocation> {
+  const cleanSql = maskCommentsAndStrings(sanitizedSql);
+  const aliasLocations = new Map<string, SourceLocation>();
+
+  let depth = 0;
+  let i = blockStartOffset;
+  const limit = Math.min(blockEndOffset, cleanSql.length);
+
+  while (i < limit) {
+    const ch = cleanSql[i];
+    if (ch === '(') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === ')') {
+      depth = Math.max(0, depth - 1);
+      i++;
+      continue;
+    }
+
+    if (depth === 0) {
+      const prevChar = i > blockStartOffset ? (cleanSql[i - 1] ?? ' ') : ' ';
+      if (!/[a-zA-Z0-9_]/.test(prevChar)) {
+        const slice = cleanSql.slice(i, limit);
+        const clauseMatch =
+          /^(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)(?:[ \t\r\n]+(?:AS[ \t\r\n]+)?([a-zA-Z0-9_]+))?/i.exec(
+            slice
+          );
+
+        if (clauseMatch && clauseMatch[1]) {
+          const rawTableToken = clauseMatch[1];
+          const rawCandidateAlias = clauseMatch[2];
+
+          const tableStartInSlice = clauseMatch[0].indexOf(rawTableToken);
+          const absTableStart = i + tableStartInSlice;
+          const absTableEnd = absTableStart + rawTableToken.length;
+
+          const dbtRel = relations.get(rawTableToken.toLowerCase());
+          const canonicalTableName = (
+            dbtRel?.modelOrTableName ?? rawTableToken
+          ).toLowerCase();
+
+          const hasValidAlias =
+            Boolean(rawCandidateAlias) &&
+            !SQL_CLAUSE_RESERVED_WORDS.has(rawCandidateAlias!.toLowerCase());
+
+          if (hasValidAlias && rawCandidateAlias) {
+            const aliasStartInSlice = clauseMatch[0].lastIndexOf(rawCandidateAlias);
+            const absAliasStart = i + aliasStartInSlice;
+            const absAliasEnd = absAliasStart + rawCandidateAlias.length;
+
+            const aliasLoc = offsetRangeToSourceLocation(
+              sanitizedSql,
+              filePath,
+              absAliasStart,
+              absAliasEnd
+            );
+            aliasLocations.set(rawCandidateAlias.toLowerCase(), aliasLoc);
+            aliasLocations.set(canonicalTableName, aliasLoc);
+          } else {
+            const tableLoc = offsetRangeToSourceLocation(
+              sanitizedSql,
+              filePath,
+              absTableStart,
+              absTableEnd
+            );
+            aliasLocations.set(canonicalTableName, tableLoc);
+          }
+
+          i += clauseMatch[0].length;
+          continue;
+        }
+      }
+    }
+
+    i++;
+  }
+
+  return aliasLocations;
 }

@@ -66,7 +66,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ): vscode.Definition | null {
       const rawSql = document.getText();
       const cursorOffset = document.offsetAt(position);
-      const target = analyzer.computeDefinition(rawSql, cursorOffset, document.uri.fsPath);
+      const config = vscode.workspace.getConfiguration('dbtPrism');
+      const tableTargetMode = config.get<'from_alias' | 'source_model'>(
+        'goToDefinition.tableTarget',
+        'from_alias'
+      );
+
+      const target = analyzer.computeDefinition(rawSql, cursorOffset, document.uri.fsPath, {
+        tableTargetMode,
+      });
 
       if (!target || !target.filePath) {
         return null;

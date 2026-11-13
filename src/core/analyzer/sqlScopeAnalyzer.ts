@@ -5,6 +5,7 @@ import {
   ColumnMetadata,
   CompletionCandidate,
   DbtRelationToken,
+  DefinitionOptions,
   MetadataRegistryPort,
   RelationMaterialization,
   SourceLocation,
@@ -15,6 +16,7 @@ import {
   CteLocationBlock,
   extractCursorTokenForDefinition,
   locateCteDefinitions,
+  locateFromJoinAliases,
   locateSelectProjectionColumns,
 } from '../parser/sqlLocationFinder.js';
 
@@ -84,15 +86,17 @@ export class SqlScopeAnalyzer {
     return { columns, refs, materialized: effectiveMaterialized };
   }
 
-  /**
+/**
    * Resolves the target SourceLocation for Go-to-Definition (Ctrl+Click / F12)
    * on a table, model ref(), CTE alias, or column.
    */
   public computeDefinition(
     rawSql: string,
     cursorOffset: number,
-    currentFilePath = ''
+    currentFilePath = '',
+    options: DefinitionOptions = {}
   ): SourceLocation | null {
+    const tableTargetMode = options.tableTargetMode ?? 'from_alias';
     const { sanitizedSql, relations } = sanitizeJinjaSql(rawSql);
 
     // 1. Direct click inside {{ ref('model') }} or {{ source('src', 'table') }}
@@ -130,17 +134,39 @@ export class SqlScopeAnalyzer {
       return clickedCteBlock.nameLocation;
     }
 
-    // 3. Determine the active SELECT AST block at the cursor offset
+    // 3. Determine the active SELECT AST block and offset range at the cursor offset
     const activeSelectAst = this.findSelectAstAtOffset(ast, cteLocations, cursorOffset);
+    const activeBlockRange = this.getActiveBlockRangeAtOffset(
+      sanitizedSql,
+      cteLocations,
+      cursorOffset
+    );
     const activeRelations = this.resolveScopedRelations(activeSelectAst, cteMap, relations);
 
-    // 4. Case A: Clicking on table/CTE qualifier before a dot (`cus.customer_id` -> `cus`)
-    //    or clicking on a table/CTE/alias in a FROM / JOIN clause
-    if (token.isQualifierBeforeDot || token.isAfterFromOrJoin) {
+    // 4. Case A1: Clicking on a table/CTE qualifier before a dot (e.g. `cus` in `SELECT cus.customer_id`)
+    if (token.isQualifierBeforeDot) {
+      if (tableTargetMode === 'from_alias') {
+        const fromJoinAliases = locateFromJoinAliases(
+          sanitizedSql,
+          currentFilePath,
+          activeBlockRange.start,
+          activeBlockRange.end,
+          relations
+        );
+        const localAliasLoc = fromJoinAliases.get(lowerWord);
+        if (localAliasLoc) {
+          return localAliasLoc;
+        }
+      }
       return this.resolveRelationDefinition(lowerWord, activeRelations, cteLocations);
     }
 
-    // 5. Case B: Clicking on a qualified column (`cus.customer_id` -> `customer_id`)
+    // 5. Case A2: Clicking on a table/CTE name or alias inside a FROM or JOIN clause
+    if (token.isAfterFromOrJoin) {
+      return this.resolveRelationDefinition(lowerWord, activeRelations, cteLocations);
+    }
+
+    // 6. Case B: Clicking on a qualified column (`cus.customer_id` -> `customer_id`)
     if (token.qualifier) {
       const targetRel = activeRelations.get(token.qualifier.toLowerCase());
       const col = targetRel?.columns.find((c) => c.name.toLowerCase() === lowerWord);
@@ -150,8 +176,7 @@ export class SqlScopeAnalyzer {
       return null;
     }
 
-    // 6. Case C: Clicking on an unqualified column or column alias inside SELECT / WHERE / ON / GROUP BY
-    // 6a. Direct match against columns in activeRelations (e.g. `order_id` or `amount_usd` in `vip_orders`)
+    // 7. Case C: Clicking on an unqualified column or column alias inside SELECT / WHERE / ON / GROUP BY
     for (const rel of activeRelations.values()) {
       const foundCol = rel.columns.find((c) => c.name.toLowerCase() === lowerWord);
       if (foundCol?.definitionLocation) {
@@ -159,8 +184,6 @@ export class SqlScopeAnalyzer {
       }
     }
 
-    // 6b. If clicking on a column alias on its own definition line (e.g. `amount_usd as net_revenue_usd`),
-    //     resolve the underlying source column from `activeRelations` so the user can chain Ctrl+Click!
     const aliasedSourceRef = this.findUnderlyingColumnForSelectAlias(
       activeSelectAst,
       lowerWord
@@ -182,8 +205,24 @@ export class SqlScopeAnalyzer {
       }
     }
 
-    // 7. Fallback: check if the identifier is a relation alias or CTE name
+    // 8. Fallback: check if the identifier is a relation alias or CTE name
     return this.resolveRelationDefinition(lowerWord, activeRelations, cteLocations);
+  }
+
+  private getActiveBlockRangeAtOffset(
+    sanitizedSql: string,
+    cteLocations: Map<string, CteLocationBlock>,
+    cursorOffset: number
+  ): { start: number; end: number } {
+    for (const loc of cteLocations.values()) {
+      if (cursorOffset >= loc.bodyStartOffset && cursorOffset <= loc.bodyEndOffset) {
+        return { start: loc.bodyStartOffset, end: loc.bodyEndOffset };
+      }
+    }
+    return {
+      start: this.getMainQueryStartOffset(cteLocations),
+      end: sanitizedSql.length,
+    };
   }
 
   public computeCompletions(rawSql: string, cursorOffset: number): CompletionCandidate[] {

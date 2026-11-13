@@ -18,7 +18,40 @@ describe('SqlScopeAnalyzer - Go to Definition (Ctrl+Click)', () => {
     analyzer = new SqlScopeAnalyzer(indexer);
   });
 
-  it('jumps to the model .sql file when Ctrl+Clicking inside {{ ref("customers") }}', () => {
+  it('jumps first to the FROM alias when Ctrl+Clicking a table qualifier in SELECT (default from_alias mode)', () => {
+    const query = [
+      'select cu|s.customer_id',
+      "from {{ ref('customers') }} as cus",
+    ].join('\n');
+    const { sql, cursorOffset } = extractCursor(query);
+
+    const loc = analyzer.computeDefinition(sql, cursorOffset, '/tmp/sandbox.sql');
+
+    expect(loc).toEqual({
+      filePath: '/tmp/sandbox.sql',
+      line: 1,
+      startColumn: 31,
+      endColumn: 34,
+    });
+  });
+
+  it('jumps directly to the model .sql file when tableTargetMode is set to source_model', () => {
+    const query = [
+      'select cu|s.customer_id',
+      "from {{ ref('customers') }} as cus",
+    ].join('\n');
+    const { sql, cursorOffset } = extractCursor(query);
+
+    const loc = analyzer.computeDefinition(sql, cursorOffset, '/tmp/sandbox.sql', {
+      tableTargetMode: 'source_model',
+    });
+
+    expect(loc).not.toBeNull();
+    expect(loc?.filePath).toBe(path.join(playgroundDir, 'models/marts/customers.sql'));
+    expect(loc?.line).toBe(0);
+  });
+
+  it('jumps to the model .sql file when Ctrl+Clicking inside {{ ref("customers") }} next to the alias', () => {
     const query = `select * from {{ ref('cust|omers') }} as cus`;
     const { sql, cursorOffset } = extractCursor(query);
 
@@ -29,21 +62,9 @@ describe('SqlScopeAnalyzer - Go to Definition (Ctrl+Click)', () => {
     expect(loc?.line).toBe(0);
   });
 
-  it('jumps to the model .sql file when Ctrl+Clicking on a table alias before a dot (cus.customer_id)', () => {
-    const query = `
-      select cu|s.customer_id
-      from {{ ref('customers') }} as cus
-    `;
-    const { sql, cursorOffset } = extractCursor(query);
-
-    const loc = analyzer.computeDefinition(sql, cursorOffset, '/tmp/sandbox.sql');
-
-    expect(loc).not.toBeNull();
-    expect(loc?.filePath).toBe(path.join(playgroundDir, 'models/marts/customers.sql'));
-  });
-
-  it('jumps to the local CTE declaration when Ctrl+Clicking on a CTE alias (v.net_revenue_usd)', () => {
-    const query = [
+  it('supports 2-step navigation for CTEs: SELECT v.col -> FROM vip_orders as v -> WITH vip_orders AS (', () => {
+    // Step 1: Click `v` in `select v.net_revenue_usd` -> jumps to `as v` on line 5
+    const step1Query = [
       'with vip_orders as (',
       '    select order_id, amount_usd as net_revenue_usd',
       "    from {{ ref('stg_orders') }}",
@@ -52,10 +73,38 @@ describe('SqlScopeAnalyzer - Go to Definition (Ctrl+Click)', () => {
       'from vip_orders as v',
     ].join('\n');
 
-    const { sql, cursorOffset } = extractCursor(query);
-    const loc = analyzer.computeDefinition(sql, cursorOffset, '/tmp/sandbox.sql');
+    const step1 = extractCursor(step1Query);
+    const step1Loc = analyzer.computeDefinition(
+      step1.sql,
+      step1.cursorOffset,
+      '/tmp/sandbox.sql'
+    );
 
-    expect(loc).toEqual({
+    expect(step1Loc).toEqual({
+      filePath: '/tmp/sandbox.sql',
+      line: 5,
+      startColumn: 19,
+      endColumn: 20,
+    });
+
+    // Step 2: Click `vip_orders` in `from vip_orders as v` -> jumps to `with vip_orders as (` on line 0
+    const step2Query = [
+      'with vip_orders as (',
+      '    select order_id, amount_usd as net_revenue_usd',
+      "    from {{ ref('stg_orders') }}",
+      ')',
+      'select v.net_revenue_usd',
+      'from vip_|orders as v',
+    ].join('\n');
+
+    const step2 = extractCursor(step2Query);
+    const step2Loc = analyzer.computeDefinition(
+      step2.sql,
+      step2.cursorOffset,
+      '/tmp/sandbox.sql'
+    );
+
+    expect(step2Loc).toEqual({
       filePath: '/tmp/sandbox.sql',
       line: 0,
       startColumn: 5,
@@ -63,7 +112,7 @@ describe('SqlScopeAnalyzer - Go to Definition (Ctrl+Click)', () => {
     });
   });
 
-  it('jumps to the column projection inside the local CTE when Ctrl+Clicking a CTE column', () => {
+  it('jumps directly to the column projection inside the local CTE when Ctrl+Clicking a CTE column', () => {
     const query = [
       'with vip_orders as (',
       '    select',
@@ -86,8 +135,7 @@ describe('SqlScopeAnalyzer - Go to Definition (Ctrl+Click)', () => {
     });
   });
 
-  it('supports multi-hop Ctrl+Click: from sandbox -> customers.sql -> order_metrics CTE -> stg_orders.sql', () => {
-    // Hop 1: Ctrl+Click on cus.lifetime_spend_usd in sandbox.sql -> jumps to m.lifetime_spend_usd in customers.sql
+  it('supports multi-hop Ctrl+Click on columns: from sandbox -> customers.sql -> order_metrics CTE', () => {
     const sandboxQuery = `
       select cus.lifetime_spend|_usd
       from {{ ref('customers') }} as cus
@@ -101,9 +149,8 @@ describe('SqlScopeAnalyzer - Go to Definition (Ctrl+Click)', () => {
 
     const customersPath = path.join(playgroundDir, 'models/marts/customers.sql');
     expect(hop1Loc?.filePath).toBe(customersPath);
-    expect(hop1Loc?.line).toBe(14); // Line of `m.lifetime_spend_usd` in customers.sql
+    expect(hop1Loc?.line).toBe(14);
 
-    // Hop 2: Inside customers.sql, Ctrl+Click on m.lifetime_spend_usd -> jumps to `sum(amount_usd) as lifetime_spend_usd` in order_metrics CTE
     const customersQuery = [
       "{{ config(materialized='table') }}",
       '',

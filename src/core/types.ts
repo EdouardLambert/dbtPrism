@@ -88,3 +88,9 @@ export interface MetadataRegistryPort {
   getModel(modelName: string): ModelDescriptor | undefined;
   getAllModels(): ModelDescriptor[];
 }
+
+export type TableDefinitionTargetMode = 'from_alias' | 'source_model';
+
+export interface DefinitionOptions {
+  tableTargetMode?: TableDefinitionTargetMode;
+}
