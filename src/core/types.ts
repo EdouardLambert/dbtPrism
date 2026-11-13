@@ -35,6 +35,7 @@ export interface ModelDescriptor {
   name: string;
   filePath: string;
   materialized: RelationMaterialization;
+  description?: string;
   columns: Map<string, ColumnMetadata>;
   refs: string[];
   lastUpdated: number;
@@ -93,4 +94,10 @@ export type TableDefinitionTargetMode = 'from_alias' | 'source_model';
 
 export interface DefinitionOptions {
   tableTargetMode?: TableDefinitionTargetMode;
+}
+
+export interface HoverResult {
+  candidate: CompletionCandidate;
+  startOffset: number;
+  endOffset: number;
 }

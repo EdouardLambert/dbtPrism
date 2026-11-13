@@ -25,6 +25,7 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
   private readonly models = new Map<string, ModelDescriptor>();
   private readonly yamlSchemas = new Map<string, Map<string, ColumnMetadata>>();
   private readonly yamlMaterializations = new Map<string, RelationMaterialization>();
+  private readonly yamlDescriptions = new Map<string, string>();
   private readonly rawSqlModels = new Map<string, RawSqlModelFile>();
   private readonly analyzer: SqlScopeAnalyzer;
 
@@ -84,6 +85,9 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
         const key = parsed.modelName.toLowerCase();
         if (parsed.materialized) {
           this.yamlMaterializations.set(key, parsed.materialized);
+        }
+        if (parsed.description) {
+          this.yamlDescriptions.set(key, parsed.description.trim());
         }
         const existing = this.yamlSchemas.get(key) ?? new Map<string, ColumnMetadata>();
         for (const [colKey, colMeta] of parsed.columns.entries()) {
@@ -149,6 +153,7 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
         name: sqlModel.modelName,
         filePath: sqlModel.filePath,
         materialized,
+        description: this.yamlDescriptions.get(key),
         columns: mergedColumns,
         refs,
         lastUpdated: Date.now(),
@@ -165,6 +170,7 @@ export class WorkspaceIndexer implements MetadataRegistryPort {
           name: canonicalName,
           filePath: '',
           materialized,
+          description: this.yamlDescriptions.get(key),
           columns: new Map(yamlCols),
           refs: [],
           lastUpdated: Date.now(),

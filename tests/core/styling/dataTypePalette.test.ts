@@ -93,7 +93,7 @@ describe('dataTypePalette & svgBadges - Granular Subtype Icons & Styling', () =>
     ];
 
     for (const sqlType of sampleTypes) {
-      const badge = renderColumnHeaderMarkdown(sqlType, 'test_col', false);
+      const badge = renderColumnHeaderMarkdown(sqlType, 'customers', 'test_col', false);
       expect(badge).toMatch(/^!\[\]\(data:image\/svg\+xml;base64,/);
     }
 

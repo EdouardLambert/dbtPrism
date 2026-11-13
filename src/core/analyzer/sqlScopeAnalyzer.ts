@@ -6,6 +6,7 @@ import {
   CompletionCandidate,
   DbtRelationToken,
   DefinitionOptions,
+  HoverResult,
   MetadataRegistryPort,
   RelationMaterialization,
   SourceLocation,
@@ -18,6 +19,7 @@ import {
   locateCteDefinitions,
   locateFromJoinAliases,
   locateSelectProjectionColumns,
+  maskCommentsAndStrings,
 } from '../parser/sqlLocationFinder.js';
 
 const { Parser } = NodeSqlParser;
@@ -26,8 +28,58 @@ interface ScopedRelation {
   aliasOrName: string;
   targetName: string;
   sourceKind: RelationMaterialization;
+  description?: string;
   columns: ColumnMetadata[];
 }
+
+const SQL_HOVER_IGNORED_KEYWORDS = new Set([
+  'select',
+  'from',
+  'where',
+  'group',
+  'order',
+  'by',
+  'having',
+  'limit',
+  'offset',
+  'qualify',
+  'window',
+  'join',
+  'inner',
+  'left',
+  'right',
+  'full',
+  'cross',
+  'outer',
+  'on',
+  'using',
+  'as',
+  'with',
+  'and',
+  'or',
+  'not',
+  'in',
+  'is',
+  'null',
+  'true',
+  'false',
+  'case',
+  'when',
+  'then',
+  'else',
+  'end',
+  'distinct',
+  'all',
+  'union',
+  'except',
+  'intersect',
+  'asc',
+  'desc',
+  'between',
+  'like',
+  'ilike',
+  'cast',
+]);
 
 export class SqlScopeAnalyzer {
   private readonly parser = new Parser();
@@ -568,7 +620,6 @@ export class SqlScopeAnalyzer {
       const lowerTable = rawTableName.toLowerCase();
       const explicitAlias = this.unwrapIdentifier(fromEntry?.as);
 
-      // 1. Check if it corresponds to a sanitized {{ ref('...') }} or {{ source('...') }}
       const dbtRel = relations.get(lowerTable);
       if (dbtRel) {
         const modelDesc = this.registry.getModel(dbtRel.modelOrTableName);
@@ -582,12 +633,12 @@ export class SqlScopeAnalyzer {
           aliasOrName: explicitAlias ?? dbtRel.modelOrTableName,
           targetName: dbtRel.modelOrTableName,
           sourceKind: relKind,
+          description: modelDesc?.description,
           columns: cols,
         });
         continue;
       }
 
-      // 2. Check if it corresponds to a local CTE
       const cteCols = cteMap.get(lowerTable);
       if (cteCols) {
         const effectiveAlias = (explicitAlias ?? rawTableName).toLowerCase();
@@ -600,7 +651,6 @@ export class SqlScopeAnalyzer {
         continue;
       }
 
-      // 3. Fallback: direct table name matching a registered model
       const directModel = this.registry.getModel(rawTableName);
       if (directModel) {
         const effectiveAlias = (explicitAlias ?? rawTableName).toLowerCase();
@@ -610,6 +660,7 @@ export class SqlScopeAnalyzer {
           aliasOrName: explicitAlias ?? rawTableName,
           targetName: directModel.name,
           sourceKind: relKind,
+          description: directModel.description,
           columns: Array.from(directModel.columns.values()),
         });
       }
@@ -656,6 +707,7 @@ export class SqlScopeAnalyzer {
           sourceName: rel.targetName,
           sourceKind: rel.sourceKind,
           detail: `${rel.targetName} (${rel.sourceKind})`,
+          documentation: rel.description,
           sortPriority: tablePriority++,
         });
       }
@@ -748,6 +800,7 @@ export class SqlScopeAnalyzer {
         sourceName: m.name,
         sourceKind: m.materialized ?? 'model',
         detail: `${m.name} (${m.materialized ?? 'model'})`,
+        documentation: m.description,
         sortPriority: 2,
       }));
   }
@@ -777,5 +830,253 @@ export class SqlScopeAnalyzer {
   ): string {
     const formattedSource = `${sourceName} (${sourceKind})`;
     return col.dataType ? `${col.dataType} • ${formattedSource}` : formattedSource;
+  }
+
+  /**
+   * Resolves column OR table/CTE metadata when the user hovers in the SQL editor.
+   * Returns null when hovering over comments, string literals, or SQL keywords.
+   */
+  public computeHover(rawSql: string, cursorOffset: number): HoverResult | null {
+    const { sanitizedSql, relations, materialized } = sanitizeJinjaSql(rawSql);
+
+    // 1. Ignore hover inside {{ ref('model') }} or {{ source('src', 'table') }}
+    for (const rel of relations.values()) {
+      if (cursorOffset >= rel.startOffset && cursorOffset <= rel.endOffset) {
+        return null;
+      }
+    }
+
+    // 2. Mask comments and string literals so hovering inside them never triggers a popup
+    const codeOnlySql = maskCommentsAndStrings(sanitizedSql);
+    const token = extractCursorTokenForDefinition(codeOnlySql, cursorOffset);
+    if (!token) return null;
+
+    const lowerWord = token.word.toLowerCase();
+    if (SQL_HOVER_IGNORED_KEYWORDS.has(lowerWord)) {
+      return null;
+    }
+
+    const ast =
+      this.tryParseAst(sanitizedSql) ??
+      this.tryParseAst(healSqlAtCursor(rawSql, sanitizedSql, cursorOffset).healedSql);
+    if (!ast) return null;
+
+    const cteLocations = locateCteDefinitions(sanitizedSql, '');
+
+    // 3. Hovering directly over a CTE declaration header (`WITH my_cte AS (`)
+    const clickedCteBlock = cteLocations.get(lowerWord);
+    if (
+      clickedCteBlock &&
+      cursorOffset >= token.startOffset &&
+      token.startOffset < clickedCteBlock.bodyStartOffset
+    ) {
+      return {
+        candidate: {
+          label: clickedCteBlock.cteName,
+          insertText: clickedCteBlock.cteName,
+          kind: 'cte',
+          sourceName: clickedCteBlock.cteName,
+          sourceKind: 'cte',
+          detail: `${clickedCteBlock.cteName} (cte)`,
+          sortPriority: 0,
+        },
+        startOffset: token.startOffset,
+        endOffset: token.endOffset,
+      };
+    }
+
+    const cteMap = this.extractLocalCtes(ast, relations, sanitizedSql, '', cteLocations);
+    const activeSelectAst = this.findSelectAstAtOffset(ast, cteLocations, cursorOffset);
+    const activeRelations = this.resolveScopedRelations(activeSelectAst, cteMap, relations);
+
+    // 4. Hovering over a table qualifier (`cus` in `cus.customer_id`) or table/alias in FROM / JOIN
+    if (token.isQualifierBeforeDot || token.isAfterFromOrJoin) {
+      return this.resolveRelationHover(
+        lowerWord,
+        token.startOffset,
+        token.endOffset,
+        activeRelations,
+        cteLocations
+      );
+    }
+
+    // 5. Hovering over a Qualified Column (`cus.customer_id` or `v.net_revenue_usd`)
+    if (token.qualifier) {
+      const targetRel = activeRelations.get(token.qualifier.toLowerCase());
+      const col = targetRel?.columns.find((c) => c.name.toLowerCase() === lowerWord);
+      if (!targetRel || !col) return null;
+
+      return {
+        candidate: this.createColumnCandidate(col, col.name, col.name, targetRel, 0),
+        startOffset: token.startOffset,
+        endOffset: token.endOffset,
+      };
+    }
+
+    // 6. Hovering over a standalone table/CTE alias in the query
+    if (activeRelations.has(lowerWord)) {
+      return this.resolveRelationHover(
+        lowerWord,
+        token.startOffset,
+        token.endOffset,
+        activeRelations,
+        cteLocations
+      );
+    }
+
+    // 7. Hovering over an Unqualified Column matching a relation in the active scope
+    for (const rel of activeRelations.values()) {
+      const col = rel.columns.find((c) => c.name.toLowerCase() === lowerWord);
+      if (col) {
+        return {
+          candidate: this.createColumnCandidate(col, col.name, col.name, rel, 0),
+          startOffset: token.startOffset,
+          endOffset: token.endOffset,
+        };
+      }
+    }
+
+    // 8. Hovering over a computed or aliased column in the active SELECT projection
+    const enclosingCteName = this.findEnclosingCteName(cteLocations, cursorOffset);
+    const currentScopeName = enclosingCteName ?? 'current_model';
+    const currentScopeKind: RelationMaterialization = enclosingCteName
+      ? 'cte'
+      : (materialized ?? 'model');
+
+    const projectedCols = this.extractProjectedColumns(
+      activeSelectAst,
+      activeRelations,
+      currentScopeName,
+      currentScopeKind
+    );
+    const projectedCol = projectedCols.find((c) => c.name.toLowerCase() === lowerWord);
+
+    if (projectedCol) {
+      const underlyingRef = this.findUnderlyingColumnForSelectAlias(activeSelectAst, lowerWord);
+      let sourceRelation: ScopedRelation = {
+        aliasOrName: currentScopeName,
+        targetName: currentScopeName,
+        sourceKind: currentScopeKind,
+        columns: projectedCols,
+      };
+
+      if (underlyingRef) {
+        if (underlyingRef.table) {
+          const matchedRel = activeRelations.get(underlyingRef.table.toLowerCase());
+          if (matchedRel) sourceRelation = matchedRel;
+        } else if (activeRelations.size === 1) {
+          const singleRel = Array.from(activeRelations.values())[0];
+          if (singleRel) sourceRelation = singleRel;
+        }
+      }
+
+      return {
+        candidate: this.createColumnCandidate(
+          projectedCol,
+          projectedCol.name,
+          projectedCol.name,
+          sourceRelation,
+          0
+        ),
+        startOffset: token.startOffset,
+        endOffset: token.endOffset,
+      };
+    }
+
+    return null;
+  }
+
+  private resolveRelationHover(
+    lowerIdentifier: string,
+    startOffset: number,
+    endOffset: number,
+    activeRelations: Map<string, ScopedRelation>,
+    cteLocations: Map<string, CteLocationBlock>
+  ): HoverResult | null {
+    const directRel = activeRelations.get(lowerIdentifier);
+    if (directRel) {
+      return {
+        candidate: {
+          label: directRel.aliasOrName,
+          insertText: directRel.aliasOrName,
+          kind: directRel.sourceKind === 'cte' ? 'cte' : 'model',
+          sourceName: directRel.targetName,
+          sourceKind: directRel.sourceKind,
+          detail: `${directRel.targetName} (${directRel.sourceKind})`,
+          documentation: directRel.description,
+          sortPriority: 0,
+        },
+        startOffset,
+        endOffset,
+      };
+    }
+
+    for (const rel of activeRelations.values()) {
+      if (rel.targetName.toLowerCase() === lowerIdentifier) {
+        return {
+          candidate: {
+            label: rel.targetName,
+            insertText: rel.targetName,
+            kind: rel.sourceKind === 'cte' ? 'cte' : 'model',
+            sourceName: rel.targetName,
+            sourceKind: rel.sourceKind,
+            detail: `${rel.targetName} (${rel.sourceKind})`,
+            documentation: rel.description,
+            sortPriority: 0,
+          },
+          startOffset,
+          endOffset,
+        };
+      }
+    }
+
+    const cteLoc = cteLocations.get(lowerIdentifier);
+    if (cteLoc) {
+      return {
+        candidate: {
+          label: cteLoc.cteName,
+          insertText: cteLoc.cteName,
+          kind: 'cte',
+          sourceName: cteLoc.cteName,
+          sourceKind: 'cte',
+          detail: `${cteLoc.cteName} (cte)`,
+          sortPriority: 0,
+        },
+        startOffset,
+        endOffset,
+      };
+    }
+
+    const modelDesc = this.registry.getModel(lowerIdentifier);
+    if (modelDesc) {
+      return {
+        candidate: {
+          label: modelDesc.name,
+          insertText: modelDesc.name,
+          kind: 'model',
+          sourceName: modelDesc.name,
+          sourceKind: modelDesc.materialized,
+          detail: `${modelDesc.name} (${modelDesc.materialized})`,
+          documentation: modelDesc.description,
+          sortPriority: 0,
+        },
+        startOffset,
+        endOffset,
+      };
+    }
+
+    return null;
+  }
+
+  private findEnclosingCteName(
+    cteLocations: Map<string, CteLocationBlock>,
+    cursorOffset: number
+  ): string | undefined {
+    for (const loc of cteLocations.values()) {
+      if (cursorOffset >= loc.bodyStartOffset && cursorOffset <= loc.bodyEndOffset) {
+        return loc.cteName;
+      }
+    }
+    return undefined;
   }
 }

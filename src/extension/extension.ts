@@ -1,14 +1,12 @@
 // src/extension/extension.ts
 
 import * as vscode from 'vscode';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { WorkspaceIndexer } from '../core/indexer/workspaceIndexer.js';
 import { SqlScopeAnalyzer } from '../core/analyzer/sqlScopeAnalyzer.js';
 import { CompletionCandidate } from '../core/types.js';
 import {
   renderColumnHeaderMarkdown,
-  renderMaterializationBadgeMarkdown,
+  renderRelationHeaderMarkdown,
   renderRulePillMarkdown,
 } from '../core/styling/svgBadges.js';
 
@@ -84,6 +82,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   };
 
+  const hoverProvider: vscode.HoverProvider = {
+    provideHover(
+      document: vscode.TextDocument,
+      position: vscode.Position
+    ): vscode.Hover | null {
+      const rawSql = document.getText();
+      const cursorOffset = document.offsetAt(position);
+      const hoverResult = analyzer.computeHover(rawSql, cursorOffset);
+
+      if (!hoverResult) {
+        return null;
+      }
+
+      const isLightTheme =
+        vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.Light ||
+        vscode.window.activeColorTheme.kind === vscode.ColorThemeKind.HighContrastLight;
+
+      const markdown =
+        hoverResult.candidate.kind === 'column'
+          ? buildColumnDocumentationMarkdown(hoverResult.candidate, isLightTheme)
+          : buildRelationDocumentationMarkdown(hoverResult.candidate, isLightTheme);
+
+      const range = new vscode.Range(
+        document.positionAt(hoverResult.startOffset),
+        document.positionAt(hoverResult.endOffset)
+      );
+
+      return new vscode.Hover(markdown, range);
+    },
+  };
+
   const selector: vscode.DocumentSelector = [
     { language: 'sql' },
     { language: 'jinja-sql' },
@@ -93,7 +122,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.languages.registerCompletionItemProvider(selector, provider, '.', "'", '"'),
-    vscode.languages.registerDefinitionProvider(selector, definitionProvider)
+    vscode.languages.registerDefinitionProvider(selector, definitionProvider),
+    vscode.languages.registerHoverProvider(selector, hoverProvider)
   );
 }
 
@@ -139,28 +169,24 @@ export function buildColumnDocumentationMarkdown(
     ? (candidate.label.split('.').pop() ?? candidate.label)
     : candidate.label;
 
-  // 1. Unified SVG Header: [Icon | TYPE] • column_name
+  // 1. Unified SVG Header: [Icon | TYPE] • masource.<b>macolonne</b>
   md.appendMarkdown(
-    renderColumnHeaderMarkdown(candidate.dataType, rawColumnName, isLightTheme)
+    renderColumnHeaderMarkdown(
+      candidate.dataType,
+      candidate.sourceName,
+      rawColumnName,
+      isLightTheme
+    )
   );
 
-  // 2. Second line: "source: masource (view)"
-  if (candidate.sourceName) {
-    const sourceKind = candidate.sourceKind ?? 'model';
-    const sourceColor = isLightTheme ? '#4B5563' : '#9CA3AF';
-    md.appendMarkdown(
-      `\n\n<span style="color:${sourceColor};">source: <b>${escapeHtml(candidate.sourceName)}</b> (${escapeHtml(sourceKind)})</span>`
-    );
-  }
-
-  // 3. Third line: Column description in italic and #6B7280
+  // 2. Column description in italic and #6B7280
   if (candidate.documentation) {
     md.appendMarkdown(
       `\n\n<span style="color:#6B7280;"><i>${escapeHtml(candidate.documentation)}</i></span>`
     );
   }
 
-  // 4. Structured Pill Badges for Constraints (#EF4444) and Data Tests (#F97316)
+  // 3. Structured Pill Badges for Constraints (#EF4444) and Data Tests (#F97316)
   const hasConstraints = Boolean(candidate.constraints && candidate.constraints.length > 0);
   const hasDataTests = Boolean(candidate.dataTests && candidate.dataTests.length > 0);
 
@@ -188,7 +214,7 @@ export function buildColumnDocumentationMarkdown(
   return md;
 }
 
-function buildRelationDocumentationMarkdown(
+export function buildRelationDocumentationMarkdown(
   candidate: CompletionCandidate,
   isLightTheme: boolean
 ): vscode.MarkdownString {
@@ -196,12 +222,20 @@ function buildRelationDocumentationMarkdown(
   md.supportHtml = true;
   md.isTrusted = true;
 
-  const matBadge = renderMaterializationBadgeMarkdown(
-    candidate.sourceKind ?? 'model',
-    isLightTheme
-  );
   const target = candidate.sourceName ?? candidate.label;
-  md.appendMarkdown(`**\`${escapeHtml(target)}\`** &nbsp;${matBadge}`);
+
+  // 1. Unified SVG Header: [Icon | VIEW / TABLE / CTE / INCREMENTAL] • table_name
+  md.appendMarkdown(
+    renderRelationHeaderMarkdown(candidate.sourceKind ?? 'model', target, isLightTheme)
+  );
+
+  // 2. Table description from schema.yml in italic and #6B7280
+  if (candidate.documentation) {
+    md.appendMarkdown(
+      `\n\n<span style="color:#6B7280;"><i>${escapeHtml(candidate.documentation)}</i></span>`
+    );
+  }
+
   return md;
 }
 
