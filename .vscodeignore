@@ -1,0 +1,14 @@
+.vscode/**
+.github/**
+src/**
+tests/**
+playground/**
+coverage/**
+node_modules/**
+assets/*.svg
+.gitignore
+tsconfig.json
+vitest.config.*
+*.map
+*.ts
+*.vsix
